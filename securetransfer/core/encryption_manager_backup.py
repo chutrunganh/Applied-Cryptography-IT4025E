@@ -86,7 +86,8 @@ class EncryptionManager:
                 f.write(self.public_key.public_bytes(
                     encoding=serialization.Encoding.PEM,
                     format=serialization.PublicFormat.SubjectPublicKeyInfo
-                ))            print("Key pair created and saved successfully")
+                ))            
+                print("Key pair created and saved successfully")
         except Exception as e:
             print(f"Error creating keys: {e}")
             import traceback
