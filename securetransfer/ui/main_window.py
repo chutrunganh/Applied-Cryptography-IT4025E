@@ -49,6 +49,10 @@ class MainWindow:
         self.file_processor = FileProcessor(self.digital_signature)
         self.network_manager = NetworkManager()
         
+        # Initialize database manager and perform startup cleanup
+        self.db_manager = DatabaseManager()
+        self.db_manager.startup_cleanup()
+        
         # Set up callbacks
         self.file_processor.set_progress_callback(self.update_progress)
         self.network_manager.set_status_callback(self.update_transfer_status)
@@ -65,6 +69,9 @@ class MainWindow:
         
         # Create the UI
         self.create_ui()
+        
+        # Start periodic cleanup timer (every 6 hours)
+        self.schedule_periodic_cleanup()
     
     def create_ui(self):
         """Create the main application UI"""
@@ -568,13 +575,18 @@ class MainWindow:
                         self.digital_signature.sender_public_key = sender_key
                     except:
                         self.log_to_receive("Warning: Could not parse sender's public key")
-                    
-                    # Merge the chunks and verify
+                      # Merge the chunks and verify
                     self.file_processor.set_progress_callback(
                         lambda current, total, msg: self.update_receive_progress(current, total, msg)
                     )
                     
                     final_path = self.file_processor.merge_chunks(extract_dir, save_location)
+                    
+                    # Clean up temp files after successful extraction
+                    temp_filename = os.path.basename(received_path)
+                    from ..data.database import DatabaseManager
+                    db_manager = DatabaseManager()
+                    db_manager.cleanup_after_extraction(transfer_id, temp_filename)
                     
                     # Report success
                     self.log_to_receive(f"File saved to: {final_path}")
@@ -766,6 +778,31 @@ class MainWindow:
             # If in history tab or otherwise, update status bar only
             self.status_var.set(message)
     
+    def schedule_periodic_cleanup(self):
+        """Schedule periodic cleanup every 6 hours"""
+        def periodic_cleanup():
+            try:
+                self.db_manager.cleanup_old_transfers(days_old=1)
+                print("Periodic cleanup completed")
+            except Exception as e:
+                print(f"Error during periodic cleanup: {e}")
+            
+            # Schedule next cleanup in 6 hours (21600000 ms)
+            self.root.after(21600000, periodic_cleanup)
+        
+        # Start the first cleanup after 6 hours
+        self.root.after(21600000, periodic_cleanup)
+    
+    def on_closing(self):
+        """Handle application closing with cleanup"""
+        try:
+            self.db_manager.shutdown_cleanup()
+        except Exception as e:
+            print(f"Error during shutdown cleanup: {e}")
+        self.root.destroy()
+
     def run(self):
         """Start the main application loop"""
+        # Set up cleanup on window close
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.root.mainloop()

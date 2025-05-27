@@ -278,8 +278,7 @@ class NetworkManager:
                         
                     conn.sendall(chunk)
                     sent_bytes += len(chunk)
-                    
-                    # Update status periodically (every ~1MB)
+                      # Update status periodically (every ~1MB)
                     if sent_bytes % (1024 * 1024) < (64 * 1024):
                         progress = min(100, int(sent_bytes * 100 / filesize))
                         self._update_status(transfer_id, TransferStatus.TRANSFERRING, 
@@ -289,9 +288,14 @@ class NetworkManager:
             self._update_status(transfer_id, TransferStatus.COMPLETE, 
                              f"File sent successfully")
             
+            # Auto-cleanup after successful transfer
+            self._auto_cleanup_after_transfer(transfer_id, True)
+            
         except Exception as e:
             self._update_status(transfer_id, TransferStatus.FAILED, 
                              f"Send failed: {e}")
+            # Auto-cleanup after failed transfer
+            self._auto_cleanup_after_transfer(transfer_id, False)
             raise
     
     def receive_file(self, conn, transfer_id, output_dir):
@@ -345,14 +349,47 @@ class NetworkManager:
                         progress = min(100, int(received * 100 / filesize))
                         self._update_status(transfer_id, TransferStatus.TRANSFERRING, 
                                          f"Receiving: {progress}% complete")
-            
-            # Update status
+              # Update status
             self._update_status(transfer_id, TransferStatus.COMPLETE, 
                              f"File received successfully")
+            
+            # Auto-cleanup after successful transfer
+            self._auto_cleanup_after_transfer(transfer_id, True)
             
             return output_path
             
         except Exception as e:
             self._update_status(transfer_id, TransferStatus.FAILED, 
                              f"Receive failed: {e}")
+            # Auto-cleanup after failed transfer
+            self._auto_cleanup_after_transfer(transfer_id, False)
             raise
+    
+    def _auto_cleanup_after_transfer(self, transfer_id, success):
+        """Automatically clean up after a transfer completes"""
+        try:
+            from ..data.database import DatabaseManager
+            db_manager = DatabaseManager()
+            db_manager.auto_cleanup_on_transfer_complete(transfer_id, success)
+        except Exception as e:
+            print(f"Error during auto-cleanup for transfer {transfer_id}: {e}")
+    
+    def cleanup_all_transfers(self):
+        """Clean up all active transfers and temporary files"""
+        try:
+            from ..data.database import DatabaseManager
+            db_manager = DatabaseManager()
+            db_manager.cleanup_temp_files()
+            
+            # Close any open ngrok tunnels
+            if self.ngrok_tunnel:
+                try:
+                    from pyngrok import ngrok
+                    ngrok.disconnect(self.ngrok_tunnel.public_url)
+                    self.ngrok_tunnel = None
+                except:
+                    pass
+            
+            print("All transfers cleaned up")
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
