@@ -9,6 +9,7 @@ import socket
 import threading
 import time
 import uuid
+import urllib.parse
 import requests
 
 # Optional ngrok support
@@ -127,16 +128,37 @@ class NetworkManager:
                 "port": port,
                 "local_address": f"{self.local_ip}:{port}",
                 "public_address": None
-            }
-            
-            # Handle different connection types
+            }            # Handle different connection types
             if connection_type == ConnectionType.NGROK:
                 if not NGROK_AVAILABLE:
                     raise Exception("Ngrok is not available. Please install pyngrok package.")
                     
-                # Start ngrok tunnel
-                self.ngrok_tunnel = ngrok.connect(port, "tcp")
-                server_info["public_address"] = self.ngrok_tunnel.public_url
+                try:
+                    print(f"Attempting to start ngrok TCP tunnel on port {port}...")
+                    # First disconnect any existing tunnels on this port
+                    try:
+                        existing_tunnels = ngrok.get_tunnels()
+                        for t in existing_tunnels:
+                            if str(port) in t.config['addr']:
+                                print(f"Disconnecting existing tunnel: {t.public_url}")
+                                ngrok.disconnect(t.public_url)
+                    except Exception as e:
+                        print(f"Warning cleaning tunnels: {e}")
+                    
+                    # Using TCP tunnel - better for raw socket connections like file transfers
+                    # This requires a verified account (with payment method added)
+                    self.ngrok_tunnel = ngrok.connect(port, "tcp")
+                    print(f"TCP Tunnel info: {self.ngrok_tunnel}")
+                    # Verify tunnel was created successfully
+                    if self.ngrok_tunnel and hasattr(self.ngrok_tunnel, 'public_url'):
+                        print(f"Success! Ngrok tunnel established: {self.ngrok_tunnel.public_url}")
+                        server_info["public_address"] = self.ngrok_tunnel.public_url
+                    else:
+                        print("Error: Ngrok tunnel created but public_url not available")
+                        server_info["public_address"] = "Ngrok Error: No public URL"
+                except Exception as e:
+                    print(f"Error setting up ngrok tunnel: {e}")
+                    server_info["public_address"] = f"Ngrok Error: {str(e)}"
                 
             elif connection_type == ConnectionType.DIRECT:
                 public_ip = self._get_public_ip()
@@ -213,22 +235,80 @@ class NetworkManager:
             return None
         except Exception as e:
             self._update_status(transfer_id, TransferStatus.FAILED, 
-                             f"Connection failed: {e}")
+                             f"Connection failed: {e}")            
             return None
-    
     def connect_to_server(self, transfer_id, host, port):
         """
         Connect to a server
         Returns the connected socket or None if failed
         """
         try:
+            # Store original URL if it's an HTTP/HTTPS URL
+            original_url = None
+            scheme = None
+            
+            # Handle URLs from Ngrok (http://, https://, tcp://)
+            if host.startswith(('http://', 'https://', 'tcp://')):
+                # Save original URL for later
+                original_url = host
+                
+                # Extract hostname and scheme
+                import urllib.parse
+                parsed_url = urllib.parse.urlparse(host)
+                scheme = parsed_url.scheme
+                host = parsed_url.netloc.split(':')[0]  # Remove any port in the hostname
+                print(f"Connecting to host extracted from URL: {host}")
+                
+                # Use default port if not specified or extract from URL
+                if ':' in parsed_url.netloc:
+                    # Extract port from the URL if it's there
+                    port = int(parsed_url.netloc.split(':')[1])
+                    print(f"Using port from URL: {port}")
+                elif not port or port == 0:
+                    if parsed_url.scheme == 'https':
+                        port = 443
+                    elif parsed_url.scheme == 'http':
+                        port = 80
+                    else:  # For tcp:// URLs
+                        # Use the specified port or a default
+                        if not port:
+                            port = self.default_port
+                    print(f"Using default port for {parsed_url.scheme}: {port}")
+            
             # Update status
             self._update_status(transfer_id, TransferStatus.CONNECTING, 
                              f"Connecting to {host}:{port}")
             
-            # Create socket and connect
+            # Create socket and set better timeouts
             conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            conn.connect((host, port))
+            
+            # Set a longer connection timeout for ngrok connections (10 seconds)
+            conn.settimeout(10)
+            
+            # Log connection attempt
+            print(f"Attempting to connect to {host}:{port}...")
+            
+            # Connect to the host
+            try:
+                conn.connect((host, port))
+                print(f"Socket connection established to {host}:{port}")
+            except socket.timeout:
+                raise ConnectionError(f"Connection to {host}:{port} timed out")
+            except Exception as connect_error:
+                raise ConnectionError(f"Failed to connect to {host}:{port}: {connect_error}")
+            
+            # Reset timeout to default for data transfer
+            conn.settimeout(None)
+            
+            # For HTTP/HTTPS ngrok tunnels, set up proper headers
+            if scheme in ['http', 'https']:
+                try:
+                    print(f"Setting up ngrok HTTP tunnel protocol for {scheme} connection")
+                    # Set up headers to bypass ngrok warning page
+                    self._set_ngrok_http_headers(transfer_id, conn)
+                except Exception as header_error:
+                    print(f"Warning: Failed to set ngrok headers: {header_error}")
+                    print("Attempting to continue with raw connection anyway")
             
             # Update status
             self._update_status(transfer_id, TransferStatus.CONNECTING, 
@@ -242,10 +322,9 @@ class NetworkManager:
             
             return conn
             
-        except Exception as e:
-            self._update_status(transfer_id, TransferStatus.FAILED, 
+        except Exception as e:            self._update_status(transfer_id, TransferStatus.FAILED, 
                              f"Connection failed: {e}")
-            return None
+        return None
     
     def send_file(self, conn, transfer_id, filepath):
         """
@@ -360,8 +439,7 @@ class NetworkManager:
             
         except Exception as e:
             self._update_status(transfer_id, TransferStatus.FAILED, 
-                             f"Receive failed: {e}")
-            # Auto-cleanup after failed transfer
+                             f"Receive failed: {e}")            # Auto-cleanup after failed transfer
             self._auto_cleanup_after_transfer(transfer_id, False)
             raise
     
@@ -393,3 +471,101 @@ class NetworkManager:
             print("All transfers cleaned up")
         except Exception as e:
             print(f"Error during cleanup: {e}")
+    def _set_ngrok_http_headers(self, transfer_id, conn):
+        """
+        Set up proper headers for ngrok HTTP connections to bypass the browser warning
+        and handle the HTTP protocol properly
+        """
+        try:
+            if not self.ngrok_tunnel or not hasattr(self.ngrok_tunnel, 'public_url'):
+                raise ValueError("Ngrok tunnel is not active")
+            
+            # Extract the public URL from the ngrok tunnel
+            public_url = self.ngrok_tunnel.public_url
+            
+            # Determine the host and port from the public URL
+            import urllib.parse
+            parsed_url = urllib.parse.urlparse(public_url)
+            host = parsed_url.hostname
+            path = parsed_url.path or "/"
+            
+            # Update status
+            self._update_status(transfer_id, TransferStatus.CONNECTING, 
+                             f"Setting ngrok HTTP headers for {host}")
+            
+            # For HTTPS, wrap the socket in SSL
+            if parsed_url.scheme == 'https':
+                import ssl
+                context = ssl.create_default_context()
+                conn = context.wrap_socket(conn, server_hostname=host)
+            
+            # Prepare and send an HTTP request with proper headers
+            # This helps bypass ngrok's warning page and handles the HTTP protocol
+            headers = [
+                f"GET {path} HTTP/1.1",
+                f"Host: {host}",
+                "User-Agent: SecureTransfer/1.0",  # Custom user agent
+                "Connection: Upgrade",             # Request connection upgrade
+                "Upgrade: websocket",              # Use websocket protocol which ngrok handles better
+                "Sec-WebSocket-Version: 13",       # WebSocket version
+                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==", # Standard key
+                "ngrok-skip-browser-warning: true",# Skip ngrok browser warning
+                "",                                # Empty line to end headers
+                ""                                 # Empty body
+            ]
+            
+            # Send the HTTP request
+            http_request = "\r\n".join(headers).encode("utf-8")
+            print(f"Sending HTTP headers to {host}...")
+            conn.sendall(http_request)
+            
+            # Read the HTTP response with better error handling
+            response = b""
+            try:
+                # Set a longer timeout for ngrok response (5 seconds)
+                conn.settimeout(5)
+                
+                print("Waiting for HTTP response...")
+                while True:
+                    chunk = conn.recv(1024)
+                    if not chunk:
+                        if response:
+                            break
+                        raise ConnectionError("Connection closed with no response")
+                    
+                    response += chunk
+                    
+                    # If we got the full headers or a large enough response, stop
+                    if b"\r\n\r\n" in response or len(response) > 8192:
+                        break
+                
+                # Reset the timeout to default
+                conn.settimeout(None)
+                
+                # Print the first line of the response for debugging
+                if response:
+                    first_line = response.split(b"\r\n")[0].decode('utf-8', errors='ignore')
+                    print(f"HTTP Response: {first_line}")
+                
+                # Check if the response indicates an error
+                if b"ERR_NGROK" in response:
+                    error_code = response.split(b"ERR_NGROK_")[1].split(b"<")[0].decode('utf-8', errors='ignore').strip()
+                    raise Exception(f"Ngrok error: ERR_NGROK_{error_code}")
+                
+                # Look for 101 Switching Protocols for successful WebSocket upgrade
+                if b"101 Switching Protocols" in response:
+                    print("WebSocket connection successfully established")
+                else:
+                    print("Standard HTTP connection established")
+                
+            except socket.timeout:
+                print("Timeout waiting for HTTP response - continuing anyway")
+            
+            print("Successfully set up ngrok HTTP connection with proper headers")
+            return True
+            
+        except Exception as e:
+            print(f"Error in ngrok HTTP setup: {str(e)}")
+            self._update_status(transfer_id, TransferStatus.FAILED, 
+                             f"Failed to set ngrok HTTP headers: {e}")
+            raise

@@ -468,17 +468,51 @@ class MainWindow:
             # Get the path to the prepared package
             transfer_dir = os.path.join("securetransfer", "data", "transfers", transfer_id)
             package_path = os.path.join(transfer_dir, f"{transfer_id}.zip")
-            
-            # Start the server for file transfer
-            self.log_to_send(f"Starting server on port {port}...")
+                                      # Start the server for file transfer
+            self.log_to_send(f"Starting server on port {port} using {connection_type}...")
             server_info = self.network_manager.start_server(
                 transfer_id, port, connection_type
             )
+              # Debug output and direct UI update
+            public_address = server_info.get('public_address', 'Not available')
+            self.log_to_send(f"DEBUG: Public address from server: {public_address}")
             
-            # Update UI with connection information
-            self.root.after(0, lambda: self.public_url_var.set(
-                f"Public URL: {server_info.get('public_address', 'Not available')}"
-            ))
+            # Force UI update immediately with public address
+            if public_address and public_address != "Not available":
+                self.public_url_var.set(f"Public URL: {public_address}")
+                self.root.update()
+            
+            # Add a note for HTTP/HTTPS URLs to help users
+            if public_address and (public_address.startswith('http://') or public_address.startswith('https://')):
+                # Extract just the hostname for easier copying
+                public_url_text = f"Public URL: {public_address}"
+                # Update UI immediately
+                self.public_url_var.set(public_url_text)
+                self.log_to_send("NOTE: When receiving, enter just the hostname without http:// or https://")
+                self.log_to_send(f"HOSTNAME: {public_address.split('//')[1].split(':')[0]}")
+            elif public_address and public_address.startswith("Ngrok Error:"):
+                # Show a more helpful error message for Ngrok errors
+                error_msg = public_address.replace("Ngrok Error: ", "")
+                public_url_text = f"Public URL: Not available (Ngrok error)"
+                # Update UI immediately
+                self.public_url_var.set(public_url_text)
+                self.log_to_send(f"NGROK ERROR: {error_msg}")
+                self.log_to_send("SOLUTION: Make sure your Ngrok token is valid and up to date.")
+                self.log_to_send("Run ngrok_setup.py to configure a new token.")
+            elif public_address == "Not available":
+                public_url_text = "Public URL: Not available"
+                # Update UI immediately
+                self.public_url_var.set(public_url_text)
+                if connection_type == ConnectionType.NGROK:
+                    self.log_to_send("WARNING: Ngrok public URL could not be obtained.")
+                    self.log_to_send("SOLUTION: Check your internet connection and Ngrok configuration.")
+            else:
+                public_url_text = f"Public URL: {public_address}"
+                # Update UI immediately
+                self.public_url_var.set(public_url_text)
+                
+            # Force UI to update
+            self.root.update()
             
             # Wait for a client to connect
             self.log_to_send("Waiting for receiver to connect...")
@@ -534,8 +568,7 @@ class MainWindow:
         # Log the start
         self.log_to_receive(f"Starting transfer with ID: {transfer_id}")
         self.log_to_receive(f"Connecting to {host}:{port}")
-        
-        # Start the transfer in a separate thread
+          # Start the transfer in a separate thread
         threading.Thread(
             target=self._receive_file_thread,
             args=(transfer_id, host, port, sender_key_pem, save_location),
@@ -545,6 +578,27 @@ class MainWindow:
     def _receive_file_thread(self, transfer_id, host, port, sender_key_pem, save_location):
         """Thread to handle the file receiving process"""
         try:
+            # Clean up the host input if it contains http:// or https://
+            if host.startswith("http://") or host.startswith("https://"):
+                self.log_to_receive("Detected URL format. Extracting hostname...")
+                import urllib.parse
+                parsed_url = urllib.parse.urlparse(host)
+                
+                # For Ngrok URLs, make sure we're not losing any subdomain parts
+                # Ngrok URLs have format: https://xxxx-xx-xxx-xxx-xxx.ngrok-free.app
+                self.log_to_receive(f"Original URL: {host}")
+                
+                # Extract just the hostname without any port that might be included
+                host = parsed_url.netloc.split(':')[0]
+                self.log_to_receive(f"Using hostname: {host}")
+                
+                # For Ngrok tunnels, use the protocol's standard port
+                # This is critical because Ngrok free accounts require using their HTTP/HTTPS ports
+                if not port or port == 0:
+                    port = 443 if parsed_url.scheme == "https" else 80
+                    self.log_to_receive(f"Using standard {parsed_url.scheme.upper()} port: {port}")
+            
+            self.log_to_receive(f"Attempting to connect to {host}:{port}...")
             # Connect to the sender
             conn = self.network_manager.connect_to_server(transfer_id, host, port)
             
@@ -573,9 +627,8 @@ class MainWindow:
                     try:
                         sender_key = public_decode_from_string(sender_key_pem)
                         self.digital_signature.sender_public_key = sender_key
-                    except:
-                        self.log_to_receive("Warning: Could not parse sender's public key")
-                      # Merge the chunks and verify
+                    except:                        self.log_to_receive("Warning: Could not parse sender's public key")
+                    # Merge the chunks and verify
                     self.file_processor.set_progress_callback(
                         lambda current, total, msg: self.update_receive_progress(current, total, msg)
                     )

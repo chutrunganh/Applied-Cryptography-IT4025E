@@ -160,11 +160,12 @@ class UserGuideDialog:
              "5. Click 'Start Server' to begin\n"
              "6. Share the displayed connection information with the recipient\n"
              "7. Wait for the recipient to connect and download the file"),
-            
-            ("Connection Types",
+              ("Connection Types",
              "• Local Network: Best for sending files to users on the same network\n"
              "• Direct Connection: Use when both you and the recipient have public IP addresses\n"
-             "• Ngrok Tunnel: Best option when behind firewalls or NAT (requires Ngrok account)"),
+             "• Ngrok Tunnel: Best option when behind firewalls or NAT (requires Ngrok account)\n\n"
+             "  Note: With Ngrok, the URL displayed will be HTTP format. When receiving,\n"
+             "  the recipient should enter just the hostname without http:// prefix."),
             
             ("Transfer Status",
              "The progress bar and status messages will keep you updated on the transfer status. "
